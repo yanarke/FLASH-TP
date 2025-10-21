@@ -1,387 +1,50 @@
--- Vereus — LocalScript réécrit et corrigé
--- Place dans StarterCharacterScripts ou StarterPlayerScripts
+local tool = Instance.new("Tool")
+tool.RequiresHandle = false
+tool.Name = "Flash Teleport"
+tool.Parent = game.Players.LocalPlayer.Backpack
 
--- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Debris = game:GetService("Debris")
+local player = game.Players.LocalPlayer
+local mouse = player:GetMouse()
 local TweenService = game:GetService("TweenService")
-local Workspace = game:GetService("Workspace")
-local SoundService = game:GetService("SoundService")
 
--- Player & character setup (attend si nécessaire)
-local Player = Players.LocalPlayer
-if not Player then
-    warn("LocalPlayer non trouvé, arrêt du script.")
-    return
+local function tweenTo(part, targetCFrame, duration)
+    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    local tween = TweenService:Create(part, tweenInfo, {CFrame = targetCFrame})
+    tween:Play()
+    tween.Completed:Wait()
 end
 
-local Character = Player.Character or Player.CharacterAdded:Wait()
-local Humanoid = Character:WaitForChild("Humanoid")
-Humanoid.Name = "vereus" -- garde le nom si tu veux
-local hum = Humanoid
+tool.Activated:Connect(function()
+    if not mouse or not player.Character then return end
 
--- Utility: safely get part (R6 / R15 compatible)
-local function waitForPart(parent, names)
-    for _,n in ipairs(names) do
-        local p = parent:FindFirstChild(n)
-        if p then return p end
-    end
-    -- try waiting for the primary name
-    return parent:WaitForChild(names[1], 5) or parent:WaitForChild(names[2], 5)
-end
+    local char = player.Character
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
 
-local LeftArm = waitForPart(Character, {"Left Arm", "LeftHand"})
-local RightArm = waitForPart(Character, {"Right Arm", "RightHand"})
-local LeftLeg = waitForPart(Character, {"Left Leg", "LeftLowerLeg"})
-local RightLeg = waitForPart(Character, {"Right Leg", "RightLowerLeg"})
-local Root = waitForPart(Character, {"HumanoidRootPart"})
-local Head = waitForPart(Character, {"Head"})
-local Torso = Character:FindFirstChild("Torso") or Character:FindFirstChild("UpperTorso")
-local Neck = Torso and Torso:FindFirstChild("Neck")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    local targetPos = mouse.Hit.p
+    local startPos = hrp.Position
 
--- Safety checks
-if not (LeftArm and RightArm and Root and Head and Torso) then
-    warn("Le personnage n'a pas toutes les parties attendues — script arrêté.")
-    return
-end
-
--- Local state
-local mouse = Player:GetMouse()
-local attacking = false
-local xester = false
-local rachjumper = false
-local debounce = false
-local ws = 92
-local sine = 0
-local removeuseless = Debris
-local smoothen = TweenService
-
--- Utility functions
-local function weldBetween(a, b)
-    local weld = Instance.new("ManualWeld")
-    weld.Part0 = a
-    weld.Part1 = b
-    weld.C0 = a.CFrame:Inverse() * b.CFrame
-    weld.Parent = a
-    return weld
-end
-
-local function safeSound(parent, id, volume, looped, autoRemove)
-    local success, s = pcall(function()
-        local so = Instance.new("Sound")
-        so.Parent = parent
-        so.SoundId = "rbxassetid://" .. tostring(id)
-        so.Volume = volume or 1
-        so.Looped = looped or false
-        so:Play()
-        if autoRemove and tonumber(autoRemove) then
-            removeuseless:AddItem(so, tonumber(autoRemove))
+    for , part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
         end
-        return so
-    end)
-    if success then return s end
-    return nil
-end
-
-local function createPart(parent, size, cframe, anchored, cancollide, color, material)
-    local p = Instance.new("Part")
-    p.Size = size or Vector3.new(1,1,1)
-    p.CFrame = cframe or CFrame.new()
-    p.Anchored = anchored or false
-    p.CanCollide = cancollide or false
-    if color then
-        p.BrickColor = BrickColor.new(color)
     end
-    if material then
-        p.Material = material
-    end
-    p.Parent = parent
-    return p
-end
 
--- safer immortality function (client-only, local humanoid manipulation)
-local function immortality(enable)
-    if enable then
-        hum.MaxHealth = 1e9
-        hum.Health = hum.MaxHealth
-        -- periodic ensure (light)
-        spawn(function()
-            while hum and hum.Parent and enable do
-                if hum.Health < hum.MaxHealth then
-                    hum.Health = hum.MaxHealth
-                end
-                task.wait(1)
+    local downPos = startPos - Vector3.new(0, 30, 0)
+    tweenTo(hrp, CFrame.new(downPos), 0.1)
+
+    local midPos = Vector3.new(targetPos.X, downPos.Y, targetPos.Z)
+    tweenTo(hrp, CFrame.new(midPos), 0.3)
+
+    local finalPos = targetPos + Vector3.new(0, 2.5, 0)
+    tweenTo(hrp, CFrame.new(finalPos), 0.1)
+
+    task.delay(0.2, function()
+        for , part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = true
             end
-        end)
-    else
-        hum.MaxHealth = 100
-        if hum.Health > 100 then hum.Health = 100 end
-    end
-end
-
--- Build visuals (head, bighead, mask, horns, hands)
-local bighead = createPart(Torso, Vector3.new(4.75,4.89,4.77), Head.CFrame, false, false, "Really black", Enum.Material.SmoothPlastic)
-local headmesh = Instance.new("SpecialMesh", bighead)
-headmesh.MeshType = Enum.MeshType.Head
-headmesh.Scale = Vector3.new(1.25,1.25,1.25)
-local bigheadW = weldBetween(bighead, Head)
-bigheadW.C0 = CFrame.new(0,0,0)
-
--- mask
-local mask = createPart(Torso, Vector3.new(.1, .39, .1), Head.CFrame, false, false, "White", Enum.Material.Metal)
-local maskmesh = Instance.new("SpecialMesh", mask)
-maskmesh.MeshId = "rbxassetid://5158270"
-maskmesh.TextureId = "rbxassetid://128212042"
-maskmesh.Scale = Vector3.new(0.7, 0.5, 0.5)
-local maskW = weldBetween(mask, bighead)
-maskW.C0 = CFrame.new(0,-2.4,0) * CFrame.Angles(math.rad(90),0,0)
-
--- light part (invisible holder for neon)
-local lightpart1 = createPart(Head, Vector3.new(2.42,2,.516), Head.CFrame, false, false, "White", Enum.Material.Neon)
-local lightW = weldBetween(lightpart1, Head)
-lightW.C0 = CFrame.new(0,.9,2.595)
-lightpart1.Transparency = 1
-
--- horns (use safer mesh ids — if missing, keep small part)
-local horns = createPart(Torso, Vector3.new(.1,.1,.1), Head.CFrame * CFrame.new(0,3,0), false, false, "Really black", Enum.Material.Slate)
-local hornsMesh = Instance.new("SpecialMesh", horns)
--- fallback mesh id (if asset missing, mesh remains small)
-hornsMesh.MeshId = "rbxassetid://398618628"
-hornsMesh.Scale = Vector3.new(4.9, 5.5, 5.8)
-local hornW = weldBetween(horns, bighead)
-hornW.C0 = CFrame.new(0,-3.3,.82)
-
--- magic hands (visuals)
-local hand1 = createPart(Torso, Vector3.new(.1,.1,.1), Torso.CFrame, false, false, "White", Enum.Material.Slate)
-local hand1mesh = Instance.new("SpecialMesh", hand1)
-hand1mesh.MeshId = "rbxassetid://37241605"
-hand1mesh.Scale = Vector3.new(8,8,8)
-local hand1W = weldBetween(hand1, Torso)
-hand1W.C0 = CFrame.new(4.5,-5,6) * CFrame.Angles(math.rad(10),math.rad(-5),math.rad(-36))
-
-local hand2 = createPart(Torso, Vector3.new(.1,.1,.1), Torso.CFrame, false, false, "White", Enum.Material.Slate)
-local hand2mesh = Instance.new("SpecialMesh", hand2)
-hand2mesh.MeshId = "rbxassetid://2899129749"
-hand2mesh.Scale = Vector3.new(.8, .8, .8)
-local hand2W = weldBetween(hand2, Torso)
-hand2W.C0 = CFrame.new(-5,-5,6) * CFrame.Angles(math.rad(90),math.rad(90),math.rad(95))
-
--- dark orbs (neon spheres)
-local function makeOrb(parent, attachTo, colorName)
-    local orb = createPart(parent, Vector3.new(4,4,4), attachTo.CFrame, false, false, colorName, Enum.Material.Neon)
-    orb.Shape = Enum.PartType.Ball
-    local mw = weldBetween(orb, attachTo)
-    mw.C0 = CFrame.new(0,2.7,-4)
-    local emitter = Instance.new("ParticleEmitter", orb)
-    emitter.Texture = "rbxassetid://258128463"
-    emitter.Size = NumberSequence.new(2)
-    emitter.Rate = 50
-    emitter.LockedToPart = true
-    emitter.Color = ColorSequence.new(BrickColor.new(colorName).Color, BrickColor.new(colorName).Color)
-    emitter.RotSpeed = NumberRange.new(50)
-    emitter.Lifetime = NumberRange.new(1)
-    emitter.Speed = NumberRange.new(0)
-    return orb
-end
-
-local mg1 = makeOrb(Torso, hand1, "Really black")
-local mg2 = makeOrb(Torso, hand2, "Really black")
-
--- eye parts
-local eyeball1 = createPart(Torso, Vector3.new(3.25,3.25,3.25), Head.CFrame, false, false, "Really black", Enum.Material.Glass)
-local eyeball1W = weldBetween(eyeball1, Head)
-eyeball1W.C0 = CFrame.new(.6,-.2,1.25)
-
-local eyeball2 = createPart(Torso, Vector3.new(3.25,3.25,3.25), Head.CFrame, false, false, "Really black", Enum.Material.Glass)
-local eyeball2W = weldBetween(eyeball2, Head)
-eyeball2W.C0 = CFrame.new(-.6,-.2,1.25)
-
-local eyeball3 = createPart(Torso, Vector3.new(.4,.4,.4), Head.CFrame, false, false, "Crimson", Enum.Material.Neon)
-local eyeball3W = weldBetween(eyeball3, Head)
-eyeball3W.C0 = CFrame.new(-1.2,-.3,2.65)
-
-local eyeball4 = createPart(Torso, Vector3.new(.4,.4,.4), Head.CFrame, false, false, "Crimson", Enum.Material.Neon)
-local eyeball4W = weldBetween(eyeball4, Head)
-eyeball4W.C0 = CFrame.new(1.2,-.3,2.65)
-
--- heartbeat-like update (animation tick)
-local heartbeat = Instance.new("BindableEvent")
-heartbeat.Name = "Heartbeat"
-heartbeat.Parent = script
-local frame = 1/60
-local tf = 0
-local lastframe = tick()
-
-RunService.Heartbeat:Connect(function(dt)
-    tf = tf + dt
-    if tf >= frame then
-        heartbeat:Fire()
-        tf = tf - frame
-    end
-end)
-
--- helper swait (frame-aligned)
-local function swait(num)
-    num = num or 1
-    for i = 1, num do
-        heartbeat.Event:Wait()
-    end
-end
-
--- Set initial WalkSpeed locally (note: to affect server speed, use remote or server script)
-local function setLocalWalkSpeed(speed)
-    if hum and hum.Parent then
-        -- local Humanoid.WalkSpeed affects only client-side animations; still ok in Studio tests
-        hum.WalkSpeed = speed
-    end
-end
-setLocalWalkSpeed(ws)
-
--- safe "projectile" visual attack (client-side only)
-local function energProjectile(targetPos)
-    if attacking then return end
-    attacking = true
-    setLocalWalkSpeed(0)
-    -- create a small orb that travels visually toward mouse
-    local energball = Instance.new("Part", Torso)
-    energball.Shape = Enum.PartType.Ball
-    energball.Material = Enum.Material.Neon
-    energball.Size = Vector3.new(0.2,0.2,0.2)
-    energball.Anchored = true
-    energball.CanCollide = false
-    energball.BrickColor = BrickColor.new("Really black")
-    energball.CFrame = hand1.CFrame * CFrame.new(0,1,-2.5)
-    local sid = safeSound(energball, 2880335731, 1, false, 10)
-    local travelTime = 0.8
-    local start = energball.Position
-    local dir = (targetPos - start).Unit
-    local travelled = 0
-    local speed = (targetPos - start).Magnitude / travelTime
-
-    for i = 1, math.ceil(travelTime * 60) do
-        energball.Size = energball.Size + Vector3.new(.02,.02,.02)
-        energball.CFrame = CFrame.new(energball.Position + dir * (speed/60))
-        hand1W.C0 = hand1W.C0:lerp(CFrame.new(6.5,0,-1) * CFrame.Angles(math.rad(70),math.rad(90),0), .2)
-        hand2W.C0 = hand2W.C0:lerp(CFrame.new(6.5,0,-5) * CFrame.Angles(math.rad(-110),math.rad(90),0), .2)
-        swait()
-    end
-
-    -- explosion visual (client-side)
-    local explosionVisual = createPart(Torso, Vector3.new(1,1,1), energball.CFrame, true, false, "Really black", Enum.Material.Neon)
-    explosionVisual.Size = Vector3.new(1,1,1)
-    local explSound = safeSound(explosionVisual, 2006635781, 1, false, 5)
-    for i = 1, 40 do
-        explosionVisual.Size = explosionVisual.Size + Vector3.new(3,3,3)
-        explosionVisual.Transparency = explosionVisual.Transparency + 1/40
-        swait()
-    end
-    explosionVisual:Destroy()
-    energball:Destroy()
-    setLocalWalkSpeed(ws)
-    attacking = false
-end
-
--- Input handling (keyboard)
-mouse.KeyDown:Connect(function(key)
-    key = key:lower()
-    if key == "m" then
-        -- toggle immortality (client)
-        immortality(true) -- voir note: côté client seulement
-        -- on laisse une courte notification sonore
-        safeSound(Head, 2867055627, 1, false, 6)
-    elseif key == "t" then
-        if debounce then return end
-        debounce = true
-        -- small taunt: play random laugh
-        -- safe list of laughter IDs (use some preselected)
-        local laughs = {2011349649,2011349983,2011351501,2011352223}
-        local laughId = laughs[math.random(1,#laughs)]
-        local l = safeSound(Head, laughId, 1, false, 6)
-        task.delay( (l and l.TimeLength) or 2, function() debounce = false end)
-    elseif key == "x" then
-        -- transform to "rachjumper" (visual)
-        if debounce then return end
-        debounce = true
-        rachjumper = true
-        xester = false
-        safeSound(Torso, 159576182, 1, false, 6)
-        -- visual changes
-        hand1.BrickColor = BrickColor.new("Really black")
-        hand2.BrickColor = BrickColor.new("Really black")
-        horns.BrickColor = BrickColor.new("Really black")
-        mask.Transparency = 0
-        -- simple animation
-        for i=1,30 do
-            hand1W.C0 = hand1W.C0:lerp(CFrame.new(6,-5 + .5 * math.sin(sine/14),6) * CFrame.Angles(math.rad(20 + 1 * math.sin(sine/13)),math.rad(-5 + 5 * math.sin(sine/12)),math.rad(-36 - 4 * math.sin(sine/11))), .1)
-            hand2W.C0 = hand2W.C0:lerp(CFrame.new(-5.5,0,5) * CFrame.Angles(math.rad(30),math.rad(-28),math.rad(37)), .1)
-            swait()
         end
-        debounce = false
-    elseif key == "z" then
-        -- transform to "xester" (white form)
-        if debounce then return end
-        debounce = true
-        xester = true
-        rachjumper = false
-        safeSound(Torso, 2866313732, 1, false, 6)
-        hand1.BrickColor = BrickColor.new("White")
-        hand2.BrickColor = BrickColor.new("White")
-        mask.Transparency = 1
-        for i=1,30 do
-            hand1W.C0 = hand1W.C0:lerp(CFrame.new(-2,-2,-4) * CFrame.Angles(math.rad(-140 + 2 * math.sin(sine)),math.rad(180 + 1 * math.sin(sine)),math.rad(30 + 2 * math.sin(sine))), .05)
-            hand2W.C0 = hand2W.C0:lerp(CFrame.new(2,-2,-4) * CFrame.Angles(math.rad(-140 + 2 * math.sin(sine)),math.rad(180 - 1 * math.sin(sine)),math.rad(-30 - 2 * math.sin(sine))), .05)
-            swait()
-        end
-        debounce = false
-    elseif key == "r" then
-        -- ranged visual attack to mouse.Hit
-        if debounce then return end
-        debounce = true
-        attacking = true
-        setLocalWalkSpeed(0)
-        local target = mouse.Hit.p
-        energProjectile(target)
-        debounce = false
-    elseif key == "c" then
-        -- toggle local invisibility for decorative parts
-        local toggle = bighead.Transparency == 0 and 1 or 0
-        bighead.Transparency = toggle
-        mask.Transparency = toggle
-    end
+    end)
 end)
-
--- Click to fire projectile (left click)
-mouse.Button1Down:Connect(function()
-    if attacking then return end
-    local target = mouse.Hit.p
-    energProjectile(target)
-end)
-
--- minor heartbeat tasks: animate eyeballs, maintain walk speed
-spawn(function()
-    while hum and hum.Parent do
-        sine = sine + 1
-        -- eyeballs breathe
-        local a = 0.3 + math.abs(math.sin(tick())) * 0.2
-        eyeball3.Size = Vector3.new(a, a, a)
-        eyeball4.Size = Vector3.new(a, a, a)
-        -- ensure speed
-        if not attacking then setLocalWalkSpeed(ws) end
-        task.wait(0.1)
-    end
-end)
-
--- cleanup utility on character removing
-Character.AncestryChanged:Connect(function(_, parent)
-    if not parent then
-        -- character removed; cleanup created parts if any remain
-        if bighead and bighead.Parent then bighead:Destroy() end
-        if mask and mask.Parent then mask:Destroy() end
-        if hand1 and hand1.Parent then hand1:Destroy() end
-        if hand2 and hand2.Parent then hand2:Destroy() end
-    end
-end)
-
--- Print ready
-print("Vereus local client script loaded for player:", Player.Name)
