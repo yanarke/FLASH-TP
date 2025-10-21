@@ -1,35 +1,26 @@
--- Portal Gun (LocalScript) - Demo rapide pour "Delta"
--- Mettre ce script dans StarterPack (LocalScript)
+-- Portal Gun (LocalScript) - Version corrigée
+-- À placer dans un Tool nommé "PortalGun" dans StarterPack
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
-local mouse = player:GetMouse()
+local tool = script.Parent
+local mouse
 
 -- Config
-local PORTAL_DISTANCE_CLONE = 80 -- rayon autour du portail pour cloner des parts (pour affichage Viewport)
-local PORTAL_SIZE = Vector3.new(4,6,0.2) -- taille du panneau du portail
-local VIEWPORT_UPDATE_RATE = 0.033 -- ~30FPS pour mettre à jour les clones (lower = faster)
-local TELEPORT_OFFSET = Vector3.new(0, 3, 0) -- offset à la sortie
+local PORTAL_DISTANCE_CLONE = 80
+local PORTAL_SIZE = Vector3.new(4, 6, 0.2)
+local VIEWPORT_UPDATE_RATE = 0.033
+local TELEPORT_OFFSET = Vector3.new(0, 3, 0)
 local TELEPORT_COOLDOWN = 0.5
 
--- Création tool (si pas déjà présent)
-local tool = Instance.new("Tool")
-tool.Name = "PortalGun"
-tool.RequiresHandle = false
-tool.Parent = player:WaitForChild("Backpack")
-
--- Stockage portails (max 2)
--- chaque portal: {Part = part, Color = Color3, Other = ref to other portal, ViewportFrame = VF, Camera = cam, clonesFolder = folder}
-local portals = {
-	red = nil,
-	blue = nil
-}
+-- Portails stockés
+local portals = { red = nil, blue = nil }
 local lastTeleport = 0
+local nextColor = "blue" -- Premier tir : bleu
 
--- Helper: create a portal part at position+normal, color = Color3
+-- Helper : créer un portail
 local function createPortalPart(pos, normal, color)
 	local p = Instance.new("Part")
 	p.Size = PORTAL_SIZE
@@ -37,56 +28,30 @@ local function createPortalPart(pos, normal, color)
 	p.CanCollide = false
 	p.Material = Enum.Material.SmoothPlastic
 	p.Transparency = 1
-	p.CFrame = CFrame.new(pos) * CFrame.fromMatrix(Vector3.new(), normal, normal:Cross(Vector3.new(0,1,0))):ToWorldSpace(CFrame.Angles(0, math.pi/2, 0))
-	-- We'll adjust orientation below more robustly:
-	local look = CFrame.new(pos, pos + normal) * CFrame.Angles(math.rad(90), 0, 0)
-	p.CFrame = look
+	p.CFrame = CFrame.lookAt(pos, pos + normal)
 
-	-- Visual outline (Frame)
-	local outer = Instance.new("SelectionBox")
-	outer.Adornee = p
-	outer.LineThickness = 0.02
-	outer.SurfaceTransparency = 0.7
-	outer.Parent = p
-	outer.Color3 = color
+	local outline = Instance.new("SelectionBox")
+	outline.Adornee = p
+	outline.LineThickness = 0.02
+	outline.SurfaceTransparency = 0.7
+	outline.Color3 = color
+	outline.Parent = p
 
-	-- Circular inner 'hole' visual (SurfaceGui + ImageLabel using a circle PNG would be nicer)
 	local surface = Instance.new("SurfaceGui")
 	surface.Face = Enum.NormalId.Front
 	surface.AlwaysOnTop = true
 	surface.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
 	surface.Parent = p
-	local frame = Instance.new("Frame")
-	frame.Size = UDim2.new(1,0,1,0)
-	frame.BackgroundTransparency = 1
-	frame.Parent = surface
 
-	-- Create a ViewportFrame to render clones (fill the surface)
 	local vp = Instance.new("ViewportFrame")
-	vp.Size = UDim2.new(1,0,1,0)
+	vp.Size = UDim2.new(1, 0, 1, 0)
 	vp.BackgroundTransparency = 1
 	vp.Parent = surface
 
 	return p, vp
 end
 
--- Helper: find parts near position to clone (simple)
-local function gatherPartsNear(pos, radius)
-	local parts = {}
-	for _, obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("BasePart") and obj.CanCollide and (obj.Position - pos).Magnitude <= radius then
-			table.insert(parts, obj)
-		end
-	end
-	return parts
-end
-
--- Helper: clear folder
-local function clearFolder(folder)
-	for _, v in ipairs(folder:GetChildren()) do v:Destroy() end
-end
-
--- Create clones inside view container (clones root)
+-- Créer clones visibles dans le ViewportFrame (simple démo)
 local function populateViewportFromPortal(portal)
 	if not portal or not portal.Part or not portal.ViewportFrame then return end
 	local pos = portal.Part.Position
@@ -94,108 +59,41 @@ local function populateViewportFromPortal(portal)
 	clonesRoot.Name = "PortalClones"
 	clonesRoot.Parent = portal.ViewportFrame
 
-	-- clone nearby parts
-	local nearby = gatherPartsNear(pos, PORTAL_DISTANCE_CLONE)
-	for _, part in ipairs(nearby) do
-		-- skip very large or terrain
-		if part:IsDescendantOf(workspace.Terrain) then continue end
-		local ok, c = pcall(function() return part:Clone() end)
-		if ok and c then
-			c.Anchored = true -- anchored for viewport rendering
-			c.Parent = clonesRoot
-			-- offset clones so they don't collide visually in the Viewport (we'll position camera instead)
-		end
-	end
-
-	-- clone player characters (all players)
-	for _, pl in ipairs(Players:GetPlayers()) do
-		if pl.Character and pl.Character:FindFirstChild("HumanoidRootPart") then
-			local charClone = pl.Character:Clone()
-			-- remove scripts, set anchored
-			for _, d in ipairs(charClone:GetDescendants()) do
-				if d:IsA("BasePart") then
-					d.Anchored = true
-				end
-				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
-					d:Destroy()
-				end
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("BasePart") and obj.CanCollide and (obj.Position - pos).Magnitude <= PORTAL_DISTANCE_CLONE then
+			local clone
+			pcall(function()
+				clone = obj:Clone()
+			end)
+			if clone then
+				clone.Anchored = true
+				clone:SetAttribute("origCFrame", obj.CFrame)
+				clone.Parent = clonesRoot
 			end
-			charClone.Parent = clonesRoot
 		end
 	end
-
 	return clonesRoot
 end
 
--- Update clones' positions to match originals relative to portal mapping
-local function syncClones(portal, otherPortal, clonesRoot)
-	if not portal or not otherPortal or not clonesRoot then return end
-	-- mapping: for each original part in workspace matching name/position we try to find clone and set CFrame to corresponding transformed CFrame
-	-- For demo, we position clones in world coordinates relative to other portal, using offset between portals
-	local from = portal.Part.CFrame
-	local to = otherPortal.Part.CFrame
+-- Synchronise les clones avec leur original
+local function updateClones(portal)
+	if not portal or not portal.clonesFolder then return end
+	if not portal.Other or not portal.Other.Part then return end
 
-	local offset = to:ToObjectSpace(from) -- transform
-	-- Actually we'll compute mapping as: worldPos -> relative to 'from' then transformed to 'to'.
-	for _, clone in ipairs(clonesRoot:GetChildren()) do
-		-- try to find original by Name in workspace (best-effort)
-		local candidate = workspace:FindFirstChild(clone.Name, true) -- not available with second arg; ignore
-		-- Instead we'll compute approximate mapping from clone's stored position (we saved original CFrame in attribute)
-		local origCFrame = clone:GetAttribute("origCFrame")
-		if origCFrame then
-			local newCFrame = to * (from:Inverse() * origCFrame)
-			clone.CFrame = newCFrame
-		else
-			-- fallback: put clones near the 'to' portal
-			clone.CFrame = to + Vector3.new(0,0,0)
+	local fromCF = portal.Part.CFrame
+	local toCF = portal.Other.Part.CFrame
+
+	for _, clone in ipairs(portal.clonesFolder:GetChildren()) do
+		local orig = clone:GetAttribute("origCFrame")
+		if orig then
+			local mapped = toCF * (fromCF:Inverse() * orig)
+			clone.CFrame = mapped
 		end
 	end
 end
 
--- Helper: attach an attribute origCFrame to clones so we can map them later
-local function tagOriginalsAndClone(portal)
-	-- This routine will gather nearby parts and create clones with origCFrame attributes
-	clearFolder(portal.ViewportFrame)
-	local clonesRoot = populateViewportFromPortal(portal)
-	if not clonesRoot then return nil end
-
-	-- store origCFrame attribute on each clone from corresponding original (best-effort match by name/position)
-	for _, c in ipairs(clonesRoot:GetChildren()) do
-		-- try to find original with same name and approximate position
-		local best
-		local bestDist = math.huge
-		for _, orig in ipairs(workspace:GetDescendants()) do
-			if orig:IsA("BasePart") and orig.Name == c.Name then
-				local d = (orig.Position - portal.Part.Position).Magnitude
-				if d < bestDist then
-					bestDist = d
-					best = orig
-				end
-			end
-		end
-		if best and best:IsA("BasePart") then
-			c:SetAttribute("origCFrame", best.CFrame)
-		else
-			-- if it's a full character clone, try matching by HumanoidRootPart name
-			local hrp = c:FindFirstChild("HumanoidRootPart", true)
-			if hrp then
-				-- find matching player by name
-				for _, pl in ipairs(Players:GetPlayers()) do
-					if pl.Character and pl.Character.Name == c.Name and pl.Character:FindFirstChild("HumanoidRootPart") then
-						c:SetAttribute("origCFrame", pl.Character.HumanoidRootPart.CFrame)
-						break
-					end
-				end
-			end
-		end
-	end
-
-	return clonesRoot
-end
-
--- Place portal function
+-- Création et placement d’un portail
 local function placePortal(colorName, color3, hitPos, hitNormal)
-	-- if portal exists, destroy old one of that color
 	if portals[colorName] and portals[colorName].Part then
 		portals[colorName].Part:Destroy()
 		portals[colorName] = nil
@@ -203,13 +101,10 @@ local function placePortal(colorName, color3, hitPos, hitNormal)
 
 	local part, vp = createPortalPart(hitPos, hitNormal, color3)
 	part.Parent = workspace
-	part.Name = colorName.."Portal"
 
-	-- Create a camera for this ViewportFrame
 	local cam = Instance.new("Camera")
 	cam.Parent = vp
 
-	-- prepare portal table
 	local portalData = {
 		Part = part,
 		Color = color3,
@@ -219,109 +114,67 @@ local function placePortal(colorName, color3, hitPos, hitNormal)
 	}
 	portals[colorName] = portalData
 
-	-- Link to other portal if exists
 	local otherName = (colorName == "red" and "blue" or "red")
 	if portals[otherName] and portals[otherName].Part then
 		portals[colorName].Other = portals[otherName]
 		portals[otherName].Other = portals[colorName]
 	end
 
-	-- populate viewport clones (initial)
-	local clones = tagOriginalsAndClone(portalData)
-	portalData.clonesFolder = clones
+	portalData.clonesFolder = populateViewportFromPortal(portalData)
 
-	-- set camera so that it looks from the other portal's point of view (initial)
-	if portalData.Other then
-		-- camera CFrame mapping: camera located at otherPortal's CFrame looking in same relative direction as player camera but transformed
-		local worldCam = workspace.CurrentCamera
-		local relative = portalData.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
-		portalData.Camera.CFrame = portalData.Part.CFrame * relative
-		vp.CurrentCamera = portalData.Camera
-	end
-
-	-- touch detection for teleport
-	local touchedConn
-	touchedConn = part.Touched:Connect(function(otherPart)
+	-- Téléportation
+	part.Touched:Connect(function(otherPart)
 		if not player.Character then return end
 		local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-		if not hrp or otherPart ~= hrp and not otherPart:IsDescendantOf(player.Character) then return end
-
-		-- throttle teleport
+		if not hrp then return end
+		if not (otherPart == hrp or otherPart:IsDescendantOf(player.Character)) then return end
 		if tick() - lastTeleport < TELEPORT_COOLDOWN then return end
 		lastTeleport = tick()
 
-		-- must have other portal to teleport
 		if not portalData.Other or not portalData.Other.Part then return end
 
-		-- compute exit position relative to portal mapping
 		local fromCF = portalData.Part.CFrame
 		local toCF = portalData.Other.Part.CFrame
 
-		-- relative transform of HRP to fromCF
 		local rel = fromCF:Inverse() * hrp.CFrame
-		local targetCF = toCF * rel
-		-- apply offset upward to avoid being stuck
-		targetCF = targetCF + TELEPORT_OFFSET
+		local targetCF = toCF * rel + TELEPORT_OFFSET
 
-		-- perform teleport (local)
 		hrp.CFrame = targetCF
 	end)
 
-	-- return portalData (for possible further control)
 	return portalData
 end
 
--- Update loop for viewports (simple)
-local lastUpdate = 0
+-- Boucle de mise à jour
 RunService.RenderStepped:Connect(function(dt)
-	lastUpdate = lastUpdate + dt
-	if lastUpdate < VIEWPORT_UPDATE_RATE then return end
-	lastUpdate = 0
-
-	for name, p in pairs(portals) do
-		if p and p.Part and p.ViewportFrame and p.Camera and p.Other and p.Other.Part then
-			-- update camera: set camera position to be where the real world camera would be relative to the other portal
-			local worldCam = workspace.CurrentCamera
-			local relativeCam = p.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
-			-- place camera at this portal with the same relative transform
-			p.Camera.CFrame = p.Part.CFrame * relativeCam
-			p.ViewportFrame.CurrentCamera = p.Camera
-
-			-- lazily refresh clones if missing or every few updates
-			if not p.clonesFolder or #p.clonesFolder:GetChildren() == 0 then
-				p.clonesFolder = tagOriginalsAndClone(p)
-			else
-				-- sync clones positions using stored origCFrame -> transform to other portal
-				for _, clone in ipairs(p.clonesFolder:GetChildren()) do
-					local orig = clone:GetAttribute("origCFrame")
-					if orig then
-						local mapped = p.Part.CFrame * (p.Other.Part.CFrame:ToObjectSpace(orig))
-						clone.CFrame = mapped
-					end
-				end
-			end
+	for _, p in pairs(portals) do
+		if p and p.Part and p.Other and p.Other.Part then
+			updateClones(p)
 		end
 	end
 end)
 
--- Input handling: left click places alternating red/blue portal
-local nextColor = "blue" -- first shot will be blue (so red/blue alternate)
+-- Gestion souris (activation du tir)
+tool.Equipped:Connect(function(m)
+	mouse = m
+end)
+
 tool.Activated:Connect(function()
 	if not mouse then return end
 	local target = mouse.Hit
-	local pos = target.p
-	-- compute normal: approximate by ray from camera to hitpoint
+	if not target then return end
+
+	local pos = target.Position
 	local cam = workspace.CurrentCamera
 	local dir = (pos - cam.CFrame.Position).Unit
-	local normal = -dir -- face camera (so portal faces player). For more realism you'd sample surface normal; this is simple.
 
-	-- toggle color
 	nextColor = (nextColor == "red") and "blue" or "red"
-	local color3 = (nextColor == "red") and Color3.fromRGB(255,80,80) or Color3.fromRGB(90,140,255)
+	local color3 = (nextColor == "red") and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(90, 140, 255)
+
 	placePortal(nextColor, color3, pos, -dir)
 end)
 
--- Cleanup on unequip/destroy: destroy portals (optional)
+-- Nettoyage
 tool.AncestryChanged:Connect(function(_, parent)
 	if not parent then
 		for _, p in pairs(portals) do
