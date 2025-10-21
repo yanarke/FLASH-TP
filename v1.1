@@ -1,444 +1,244 @@
--- Portal Gun — LocalScript optimisé + UI draggable (à mettre dans Tool "PortalGun" dans StarterPack)
--- Auteur: version corrigée pour éviter freezes, ajoute notifications + panneau draggable
+-- Portal System (Client-side version)
+-- À mettre dans StarterPlayerScripts (pas besoin de Tool)
+-- Gère : clic gauche pour tirer, portails rouge/bleu, orientation mur/sol, Viewport allégé + panneau UI
 
--- SERVICES
+-- 🔧 Services
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
-
 local player = Players.LocalPlayer
-if not player then
-	warn("PortalGun: LocalPlayer introuvable — script doit être LocalScript!")
-	return
-end
-
-local tool = script.Parent
-local mouse = nil
 local camera = workspace.CurrentCamera
 
--- CONFIGURATION (safe defaults)
+-- ⚙️ Paramètres
 local PORTAL_SIZE = Vector3.new(4, 6, 0.2)
 local TELEPORT_OFFSET = Vector3.new(0, 3, 0)
 local TELEPORT_COOLDOWN = 0.5
-local VIEW_CLONE_RADIUS = 60          -- rayon pour prendre parts proches
-local VIEW_CLONE_MAX = 30             -- nombre max d'objets clonés pour le Viewport
-local VIEW_UPDATE_RATE = 0.04         -- ~25 FPS pour mettre à jour CFrame clones
-local MIN_SEPARATION_FOR_TELEPORT = 1 -- sécurité
+local VIEW_CLONE_RADIUS = 50
+local VIEW_CLONE_MAX = 20
+local VIEW_UPDATE_RATE = 0.05
 
--- stockage portails
 local portals = { red = nil, blue = nil }
 local nextColor = "blue"
 local lastTeleport = 0
-local lastViewUpdate = 0
+local lastUpdate = 0
 
--- UTIL : notifications clients (affichées sur l'écran)
-local function notify(title, text, duration)
-	duration = duration or 4
-	pcall(function()
-		StarterGui:SetCore("SendNotification", {
-			Title = tostring(title or "Notice");
-			Text = tostring(text or "");
-			Duration = duration;
-		})
+---------------------------------------------------------------------
+-- 🖥️ Interface : panneau draggable à gauche + logs
+---------------------------------------------------------------------
+local function createUI()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "PortalHUD"
+	gui.ResetOnSpawn = false
+	gui.Parent = player:WaitForChild("PlayerGui")
+
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.new(0, 250, 0.25, 0)
+	frame.Position = UDim2.new(0, 10, 0.05, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	frame.BackgroundTransparency = 0.1
+	frame.Parent = gui
+	local corner = Instance.new("UICorner", frame)
+	corner.CornerRadius = UDim.new(0, 10)
+
+	local title = Instance.new("TextButton")
+	title.Size = UDim2.new(1, 0, 0, 30)
+	title.Text = "Portal Debug Panel"
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 14
+	title.BackgroundTransparency = 0.3
+	title.Parent = frame
+
+	local clear = Instance.new("TextButton")
+	clear.Size = UDim2.new(0, 60, 1, 0)
+	clear.Position = UDim2.new(1, -65, 0, 0)
+	clear.Text = "Clear"
+	clear.Parent = title
+
+	local logFrame = Instance.new("ScrollingFrame")
+	logFrame.Size = UDim2.new(1, -10, 1, -35)
+	logFrame.Position = UDim2.new(0, 5, 0, 35)
+	logFrame.BackgroundTransparency = 1
+	logFrame.ScrollBarThickness = 6
+	logFrame.Parent = frame
+
+	local layout = Instance.new("UIListLayout", logFrame)
+	layout.Padding = UDim.new(0, 5)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local function log(msg)
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(1, -10, 0, 16)
+		lbl.Text = tostring(msg)
+		lbl.TextSize = 12
+		lbl.TextColor3 = Color3.fromRGB(220,220,220)
+		lbl.Font = Enum.Font.SourceSans
+		lbl.BackgroundTransparency = 1
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.Parent = logFrame
+		logFrame.CanvasSize = UDim2.new(0,0,0,layout.AbsoluteContentSize.Y + 10)
+	end
+
+	clear.MouseButton1Click:Connect(function()
+		for _, c in pairs(logFrame:GetChildren()) do
+			if c:IsA("TextLabel") then c:Destroy() end
+		end
 	end)
-end
 
--- UI : panneau draggable (gauche) + log (simple)
-local function createDebugPanel()
-	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = "PortalGunDebugGUI"
-	screenGui.ResetOnSpawn = false
-	screenGui.Parent = player:WaitForChild("PlayerGui")
-
-	local panel = Instance.new("Frame")
-	panel.Name = "Panel"
-	panel.Size = UDim2.new(0, 260, 0.28, 0)
-	panel.Position = UDim2.new(0, 10, 0.06, 0)
-	panel.BackgroundTransparency = 0.15
-	panel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	panel.BorderSizePixel = 0
-	panel.Parent = screenGui
-
-	local uicorner = Instance.new("UICorner", panel)
-	uicorner.CornerRadius = UDim.new(0, 8)
-
-	-- Header
-	local header = Instance.new("TextButton")
-	header.Name = "Header"
-	header.Text = "PortalGun - Debug"
-	header.Size = UDim2.new(1, 0, 0, 28)
-	header.BackgroundTransparency = 0.25
-	header.Parent = panel
-	header.TextColor3 = Color3.new(1,1,1)
-	header.Font = Enum.Font.SourceSansBold
-	header.TextSize = 14
-	header.BorderSizePixel = 0
-
-	-- Buttons
-	local btnClear = Instance.new("TextButton", header)
-	btnClear.Size = UDim2.new(0, 70, 1, 0)
-	btnClear.Position = UDim2.new(1, -74, 0, 0)
-	btnClear.Text = "Clear"
-	btnClear.BackgroundTransparency = 0.4
-	btnClear.TextSize = 12
-	btnClear.Font = Enum.Font.SourceSans
-
-	local btnToggle = Instance.new("TextButton", header)
-	btnToggle.Size = UDim2.new(0, 70, 1, 0)
-	btnToggle.Position = UDim2.new(1, -150, 0, 0)
-	btnToggle.Text = "Toggle VP"
-	btnToggle.BackgroundTransparency = 0.4
-	btnToggle.TextSize = 12
-	btnToggle.Font = Enum.Font.SourceSans
-
-	-- Log area (ScrollingFrame)
-	local scroll = Instance.new("ScrollingFrame")
-	scroll.Name = "Log"
-	scroll.Size = UDim2.new(1, -10, 1, -38)
-	scroll.Position = UDim2.new(0, 5, 0, 33)
-	scroll.CanvasSize = UDim2.new(0, 0, 1, 0)
-	scroll.BackgroundTransparency = 1
-	scroll.Parent = panel
-	scroll.ScrollBarThickness = 6
-
-	local uiList = Instance.new("UIListLayout", scroll)
-	uiList.SortOrder = Enum.SortOrder.LayoutOrder
-	uiList.Padding = UDim.new(0, 6)
-
-	-- Draggable behavior (works with touch / mouse)
-	local dragging = false
-	local dragStart = Vector2.new()
-	local startPos = UDim2.new()
-	header.InputBegan:Connect(function(input)
+	-- Drag
+	local dragging, dragStart, startPos
+	title.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
-			startPos = panel.Position
+			startPos = frame.Position
 			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
 			end)
 		end
 	end)
 	UserInputService.InputChanged:Connect(function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
-			panel.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+			frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
 	end)
 
-	-- Log function
-	local function pushLog(text)
-		local lbl = Instance.new("TextLabel")
-		lbl.Size = UDim2.new(1, -10, 0, 18)
-		lbl.BackgroundTransparency = 1
-		lbl.TextXAlignment = Enum.TextXAlignment.Left
-		lbl.Text = tostring(text)
-		lbl.TextColor3 = Color3.fromRGB(200,200,200)
-		lbl.Font = Enum.Font.SourceSans
-		lbl.TextSize = 12
-		lbl.Parent = scroll
-		scroll.CanvasSize = UDim2.new(0, 0, 0, uiList.AbsoluteContentSize.Y + 10)
-	end
-
-	btnClear.MouseButton1Click:Connect(function()
-		for _,c in ipairs(scroll:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
-		scroll.CanvasSize = UDim2.new(0,0,0,0)
-	end)
-
-	local viewportEnabled = true
-	btnToggle.MouseButton1Click:Connect(function()
-		viewportEnabled = not viewportEnabled
-		pushLog("Viewport enabled: "..tostring(viewportEnabled))
-		for _,p in pairs(portals) do
-			if p and p.ViewportFrame then
-				p.ViewportFrame.Visible = viewportEnabled
-			end
-		end
-	end)
-
-	return {
-		ScreenGui = screenGui,
-		PushLog = pushLog,
-		Notify = function(t, msg) pushLog(("[%s] %s"):format(tostring(t), tostring(msg))) end
-	}
+	return { log = log }
 end
 
-local debugPanel = createDebugPanel()
-local function log(...) debugPanel.PushLog(table.concat({...}," ")) end
+local ui = createUI()
 
--- SAFE helpers pour orientation du portail (utilise la normale du hit)
-local function computePortalCFrame(position, normal)
-	-- normal = surface normal (pointing out of surface). We want the portal to face outward.
-	-- choose an arbitrary "up" that isn't parallel to normal
+local function notify(t, m)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", { Title = t; Text = m; Duration = 3 })
+	end)
+	ui.log(("[%s] %s"):format(t, m))
+end
+
+---------------------------------------------------------------------
+-- 🔨 Fonctions utilitaires
+---------------------------------------------------------------------
+local function getPortalCFrame(position, normal)
 	local worldUp = Vector3.new(0,1,0)
 	local dot = math.abs(normal:Dot(worldUp))
-	local upVector = (dot > 0.95) and Vector3.new(0,0,1) or worldUp
-	local right = normal:Cross(upVector)
-	if right.Magnitude == 0 then right = Vector3.new(1,0,0) end
-	right = right.Unit
-	local up = right:Cross(normal).Unit
-	-- Construct CFrame from basis: right, up, -normal (so front faces -normal)
-	local cf = CFrame.fromMatrix(position, right, up, -normal)
-	return cf
+	local up = (dot > 0.95) and Vector3.new(0,0,1) or worldUp
+	local right = normal:Cross(up).Unit
+	up = right:Cross(normal).Unit
+	return CFrame.fromMatrix(position, right, up, -normal)
 end
 
--- Crée le Part du portail + ViewportFrame minimal
-local function createPortalPart(pos, normal, color3)
+local function createPortal(color, pos, normal)
+	-- Supprimer ancien
+	if portals[color] and portals[color].Part then portals[color].Part:Destroy() end
+
 	local p = Instance.new("Part")
-	p.Name = "PortalPart"
 	p.Size = PORTAL_SIZE
 	p.Anchored = true
 	p.CanCollide = false
 	p.Material = Enum.Material.SmoothPlastic
-	p.Color = color3
-	p.Transparency = 0.15
+	p.Color = (color == "red") and Color3.fromRGB(255,80,80) or Color3.fromRGB(90,140,255)
+	p.CFrame = getPortalCFrame(pos, normal)
 	p.Parent = workspace
-	p.CFrame = computePortalCFrame(pos, normal)
 
-	-- Outline visible
-	local box = Instance.new("SelectionBox")
-	box.Adornee = p
-	box.Color3 = color3
-	box.LineThickness = 0.03
-	box.Parent = p
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.AlwaysOnTop = true
+	gui.Parent = p
 
-	-- SurfaceGui + ViewportFrame
-	local surface = Instance.new("SurfaceGui")
-	surface.Face = Enum.NormalId.Front
-	surface.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-	surface.AlwaysOnTop = true
-	surface.Parent = p
+	local view = Instance.new("ViewportFrame")
+	view.Size = UDim2.new(1,0,1,0)
+	view.BackgroundColor3 = Color3.fromRGB(10,10,10)
+	view.BackgroundTransparency = 0
+	view.Parent = gui
 
-	local vp = Instance.new("ViewportFrame")
-	vp.Size = UDim2.new(1,0,1,0)
-	vp.BackgroundTransparency = 0
-	vp.BackgroundColor3 = Color3.fromRGB(6,6,6)
-	vp.Parent = surface
-
-	-- container for clones (small)
-	local clonesFolder = Instance.new("Folder")
-	clonesFolder.Name = "PortalClones"
-	clonesFolder.Parent = vp
-
-	return p, vp, clonesFolder
-end
-
--- Récupère une liste limitée de parts proches de pos (limité par VIEW_CLONE_MAX)
-local function gatherNearbyPartsLimited(pos, radius, maxCount)
-	local out = {}
-	local count = 0
-	-- iterate workspace's children (use GetChildren + selective search to be faster)
-	for _, obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("BasePart") and obj.CanCollide and not obj:IsDescendantOf(workspace.Terrain) then
-			local d = (obj.Position - pos).Magnitude
-			if d <= radius then
-				table.insert(out, obj)
-				count = count + 1
-				if count >= maxCount then break end
-			end
-		end
-	end
-	return out
-end
-
--- Clone limités et tag origCFrame
-local function createLimitedClones(portalData)
-	if not portalData or not portalData.Part or not portalData.clonesFolder then return end
-	-- clear old
-	for _,c in ipairs(portalData.clonesFolder:GetChildren()) do c:Destroy() end
-	local pos = portalData.Part.Position
-	local nearby = gatherNearbyPartsLimited(pos, VIEW_CLONE_RADIUS, VIEW_CLONE_MAX)
-	local created = 0
-	for _, part in ipairs(nearby) do
-		local ok, clone = pcall(function() return part:Clone() end)
-		if ok and clone then
-			-- strip scripts for safety (if any)
-			for _, d in ipairs(clone:GetDescendants()) do
-				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
-					d:Destroy()
-				end
-			end
-			-- anchor clones
-			for _, sub in ipairs(clone:GetDescendants()) do
-				if sub:IsA("BasePart") then sub.Anchored = true end
-			end
-			clone:SetAttribute("origCFrame", part.CFrame)
-			clone.Parent = portalData.clonesFolder
-			created = created + 1
-		end
-	end
-
-	-- clone player's character (only the local player, lightweight)
-	if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-		local ok, charClone = pcall(function() return player.Character:Clone() end)
-		if ok and charClone then
-			-- remove scripts & anchor parts
-			for _, d in ipairs(charClone:GetDescendants()) do
-				if d:IsA("BasePart") then d.Anchored = true end
-				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then d:Destroy() end
-			end
-			charClone.Parent = portalData.clonesFolder
-			charClone:SetAttribute("origCFrame", player.Character.PrimaryPart and player.Character.PrimaryPart.CFrame or player.Character:GetModelCFrame())
-		end
-	end
-
-	debugPanel.PushLog(("Cloned %d objects for viewport (max %d)."):format(created, VIEW_CLONE_MAX))
-end
-
--- Place portal function (construct / link / create clones)
-local function placePortal(colorName, color3, hitPos, hitNormal)
-	-- destroy existing same color
-	if portals[colorName] and portals[colorName].Part then
-		portals[colorName].Part:Destroy()
-	end
-
-	local part, vp, clonesFolder = createPortalPart(hitPos, hitNormal, color3)
 	local cam = Instance.new("Camera")
-	cam.Parent = vp
-	-- keep portal data
-	local data = {
-		Part = part,
-		ViewportFrame = vp,
-		Camera = cam,
-		clonesFolder = clonesFolder,
-		Other = nil
-	}
-	portals[colorName] = data
+	cam.Parent = view
+	view.CurrentCamera = cam
 
-	-- link other
-	local otherName = (colorName == "red") and "blue" or "red"
-	if portals[otherName] and portals[otherName].Part then
-		data.Other = portals[otherName]
-		portals[otherName].Other = data
+	portals[color] = { Part = p, View = view, Camera = cam, Normal = normal }
+	local other = (color == "red") and portals.blue or portals.red
+	if other and other.Part then
+		portals[color].Other = other
+		other.Other = portals[color]
 	end
 
-	-- create limited clones once (cheap)
-	local success, err = pcall(function() createLimitedClones(data) end)
-	if not success then
-		warn("PortalGun: erreur lors du clonage: "..tostring(err))
-		notify("PortalGun - Erreur", "Erreur lors du clonage pour le viewport (voir console).")
-	end
-
-	-- set initial viewport camera transform if other exists
-	if data.Other and data.Other.Part then
-		-- set camera relative mapping
-		local worldCam = camera
-		local rel = data.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
-		data.Camera.CFrame = data.Part.CFrame * rel
-		data.ViewportFrame.CurrentCamera = data.Camera
-		-- make viewport transparent so it looks like 'seeing through'
-		data.ViewportFrame.BackgroundTransparency = 1
-	else
-		-- single portal -> dark background
-		data.ViewportFrame.BackgroundTransparency = 0
-	end
-
-	-- Connect teleport touch (safe check)
-	data._touchConn = part.Touched:Connect(function(hit)
-		local char = player.Character
-		if not char then return end
-		local hrp = char:FindFirstChild("HumanoidRootPart")
-		if not hrp then return end
-		-- ensure that the touching part belongs to this player (avoid teleporting others)
-		if not (hit == hrp or hit:IsDescendantOf(char)) then return end
-		-- cooldown
-		if tick() - lastTeleport < TELEPORT_COOLDOWN then return end
-		lastTeleport = tick()
-		-- need other portal
-		if not data.Other or not data.Other.Part then
-			notify("Portal", "Aucun portail opposé. Impossible de téléporter.")
-			return
-		end
-		-- compute mapping
-		local fromCF = data.Part.CFrame
-		local toCF = data.Other.Part.CFrame
-		local rel = fromCF:Inverse() * hrp.CFrame
-		local newCF = toCF * rel
-		-- small safety: if newCF is too close (overlap), offset upward
-		if (newCF.Position - hrp.Position).Magnitude < MIN_SEPARATION_FOR_TELEPORT then
-			newCF = newCF + Vector3.new(0, 3, 0)
-		end
-		newCF = newCF + TELEPORT_OFFSET
-		-- teleport local player safely
-		hrp.CFrame = newCF
-	end)
-
-	debugPanel.PushLog(("Placed %s portal at (%.1f, %.1f, %.1f)"):format(colorName, hitPos.X, hitPos.Y, hitPos.Z))
+	ui.log(("Placed %s portal at %.1f, %.1f, %.1f"):format(color, pos.X, pos.Y, pos.Z))
 end
 
--- Update loop : met à jour camera des viewports & clones CFrame à RATE limitée
+---------------------------------------------------------------------
+-- 🔁 Update loop (view)
+---------------------------------------------------------------------
 RunService.RenderStepped:Connect(function(dt)
-	lastViewUpdate = lastViewUpdate + dt
-	if lastViewUpdate < VIEW_UPDATE_RATE then return end
-	lastViewUpdate = 0
+	lastUpdate += dt
+	if lastUpdate < VIEW_UPDATE_RATE then return end
+	lastUpdate = 0
 
-	for name, data in pairs(portals) do
-		if data and data.Part and data.ViewportFrame and data.Camera then
-			-- if we have the other portal, set the viewport camera to represent 'what the other sees'
-			if data.Other and data.Other.Part then
-				-- update camera mapping from real world camera only (cheap)
-				local ok, err = pcall(function()
-					local worldCam = camera
-					local rel = data.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
-					data.Camera.CFrame = data.Part.CFrame * rel
-					data.ViewportFrame.CurrentCamera = data.Camera
-				end)
-				if not ok then
-					warn("PortalGun: erreur mise à jour camera viewport: "..tostring(err))
-				end
-
-				-- update cloned objects CFrame using stored origCFrame -> mapped to target portal
-				for _, clone in ipairs(data.clonesFolder:GetChildren()) do
-					local orig = clone:GetAttribute("origCFrame")
-					if orig then
-						-- mapping: orig (in world) -> relative to other portal, then to this portal's viewport
-						local mapped = data.Part.CFrame * (data.Other.Part.CFrame:ToObjectSpace(orig))
-						-- pcall to be safe
-						pcall(function() clone:SetPrimaryPartCFrame and clone:SetPrimaryPartCFrame(mapped) end)
-						-- also try simple CFrame set on parts
-						if clone:IsA("BasePart") then
-							clone.CFrame = mapped
-						else
-							-- try to set PrimaryPart if model
-							if clone.PrimaryPart then
-								clone:SetPrimaryPartCFrame(mapped)
-							else
-								-- try to set HumanoidRootPart inside model
-								local hrp = clone:FindFirstChild("HumanoidRootPart", true)
-								if hrp and hrp:IsA("BasePart") then
-									hrp.CFrame = mapped
-								end
-							end
-						end
-					end
-				end
-			else
-				-- no other portal → show dark panel (no camera)
-				data.ViewportFrame.CurrentCamera = nil
-				data.ViewportFrame.BackgroundTransparency = 0
-			end
+	for _, portal in pairs(portals) do
+		if portal.Other and portal.Part and portal.View and portal.Camera then
+			local rel = portal.Other.Part.CFrame:ToObjectSpace(camera.CFrame)
+			portal.Camera.CFrame = portal.Part.CFrame * rel
+			portal.View.BackgroundTransparency = 1
+		elseif portal.View then
+			portal.View.BackgroundTransparency = 0
 		end
 	end
 end)
 
--- ACTIVATION / input handlers
-tool.Equipped:Connect(function()
-	-- player:GetMouse() is usually ok for desktop and mobile touch when equipped in a Tool
-	mouse = player:GetMouse()
-	debugPanel.PushLog("Tool equipped")
+---------------------------------------------------------------------
+-- 🌀 Téléportation
+---------------------------------------------------------------------
+local function tryTeleport(part)
+	local char = player.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp or tick() - lastTeleport < TELEPORT_COOLDOWN then return end
+
+	for _, portal in pairs(portals) do
+		if portal.Part and portal.Other and (hrp.Position - portal.Part.Position).Magnitude < 4 then
+			lastTeleport = tick()
+			local rel = portal.Part.CFrame:Inverse() * hrp.CFrame
+			local newCF = portal.Other.Part.CFrame * rel + TELEPORT_OFFSET
+			hrp.CFrame = newCF
+			notify("Portal", "Téléporté à travers le portail !")
+		end
+	end
+end
+
+RunService.Heartbeat:Connect(function()
+	local char = player.Character
+	if char and char:FindFirstChild("HumanoidRootPart") then
+		tryTeleport(char.HumanoidRootPart)
+	end
 end)
 
-tool.Unequipped:Connect(function()
-	mouse = nil
-	debugPanel.PushLog("Tool unequipped")
+---------------------------------------------------------------------
+-- 🖱️ Input (clic / mobile tap)
+---------------------------------------------------------------------
+local function onClick()
+	local ray = workspace:Raycast(camera.CFrame.Position, camera.CFrame.LookVector * 500, RaycastParams.new())
+	if not ray then
+		notify("PortalGun", "Aucune surface détectée.")
+		return
+	end
+
+	local color = nextColor
+	local normal = ray.Normal
+	local pos = ray.Position
+	createPortal(color, pos, normal)
+	nextColor = (color == "red") and "blue" or "red"
+end
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		onClick()
+	end
 end)
 
-tool.Activated:Connect(function()
-	-- safe aim detection: use mouse if available, else cast from center of screen
-	local hitPos, hitNormal = nil, nil
-	if mouse and mouse.Hit then
-		hitPos = mouse.Hit.Position
-		-- normal from mouse.Hit: LookVector points from camera to hit; surfa
+---------------------------------------------------------------------
+-- 🚀 Init
+---------------------------------------------------------------------
+notify("PortalGun", "Système chargé — touchez ou cliquez pour tirer un portail.")
+ui.log("PortalGun prêt ✅")
