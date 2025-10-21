@@ -1,52 +1,211 @@
--- Portal Gun améliorée (LocalScript)
--- Crée deux portails connectés qui s'alignent correctement sur murs/sol/plafond
+-- Portal Gun — LocalScript optimisé + UI draggable (à mettre dans Tool "PortalGun" dans StarterPack)
+-- Auteur: version corrigée pour éviter freezes, ajoute notifications + panneau draggable
 
+-- SERVICES
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local player = Players.LocalPlayer
-local tool = script.Parent
-local mouse
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
 
--- Configuration
+local player = Players.LocalPlayer
+if not player then
+	warn("PortalGun: LocalPlayer introuvable — script doit être LocalScript!")
+	return
+end
+
+local tool = script.Parent
+local mouse = nil
+local camera = workspace.CurrentCamera
+
+-- CONFIGURATION (safe defaults)
 local PORTAL_SIZE = Vector3.new(4, 6, 0.2)
 local TELEPORT_OFFSET = Vector3.new(0, 3, 0)
 local TELEPORT_COOLDOWN = 0.5
+local VIEW_CLONE_RADIUS = 60          -- rayon pour prendre parts proches
+local VIEW_CLONE_MAX = 30             -- nombre max d'objets clonés pour le Viewport
+local VIEW_UPDATE_RATE = 0.04         -- ~25 FPS pour mettre à jour CFrame clones
+local MIN_SEPARATION_FOR_TELEPORT = 1 -- sécurité
 
+-- stockage portails
 local portals = { red = nil, blue = nil }
-local lastTeleport = 0
 local nextColor = "blue"
+local lastTeleport = 0
+local lastViewUpdate = 0
 
--- Crée le portail visuel
-local function createPortal(pos, normal, color)
+-- UTIL : notifications clients (affichées sur l'écran)
+local function notify(title, text, duration)
+	duration = duration or 4
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = tostring(title or "Notice");
+			Text = tostring(text or "");
+			Duration = duration;
+		})
+	end)
+end
+
+-- UI : panneau draggable (gauche) + log (simple)
+local function createDebugPanel()
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "PortalGunDebugGUI"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = player:WaitForChild("PlayerGui")
+
+	local panel = Instance.new("Frame")
+	panel.Name = "Panel"
+	panel.Size = UDim2.new(0, 260, 0.28, 0)
+	panel.Position = UDim2.new(0, 10, 0.06, 0)
+	panel.BackgroundTransparency = 0.15
+	panel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	panel.BorderSizePixel = 0
+	panel.Parent = screenGui
+
+	local uicorner = Instance.new("UICorner", panel)
+	uicorner.CornerRadius = UDim.new(0, 8)
+
+	-- Header
+	local header = Instance.new("TextButton")
+	header.Name = "Header"
+	header.Text = "PortalGun - Debug"
+	header.Size = UDim2.new(1, 0, 0, 28)
+	header.BackgroundTransparency = 0.25
+	header.Parent = panel
+	header.TextColor3 = Color3.new(1,1,1)
+	header.Font = Enum.Font.SourceSansBold
+	header.TextSize = 14
+	header.BorderSizePixel = 0
+
+	-- Buttons
+	local btnClear = Instance.new("TextButton", header)
+	btnClear.Size = UDim2.new(0, 70, 1, 0)
+	btnClear.Position = UDim2.new(1, -74, 0, 0)
+	btnClear.Text = "Clear"
+	btnClear.BackgroundTransparency = 0.4
+	btnClear.TextSize = 12
+	btnClear.Font = Enum.Font.SourceSans
+
+	local btnToggle = Instance.new("TextButton", header)
+	btnToggle.Size = UDim2.new(0, 70, 1, 0)
+	btnToggle.Position = UDim2.new(1, -150, 0, 0)
+	btnToggle.Text = "Toggle VP"
+	btnToggle.BackgroundTransparency = 0.4
+	btnToggle.TextSize = 12
+	btnToggle.Font = Enum.Font.SourceSans
+
+	-- Log area (ScrollingFrame)
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Log"
+	scroll.Size = UDim2.new(1, -10, 1, -38)
+	scroll.Position = UDim2.new(0, 5, 0, 33)
+	scroll.CanvasSize = UDim2.new(0, 0, 1, 0)
+	scroll.BackgroundTransparency = 1
+	scroll.Parent = panel
+	scroll.ScrollBarThickness = 6
+
+	local uiList = Instance.new("UIListLayout", scroll)
+	uiList.SortOrder = Enum.SortOrder.LayoutOrder
+	uiList.Padding = UDim.new(0, 6)
+
+	-- Draggable behavior (works with touch / mouse)
+	local dragging = false
+	local dragStart = Vector2.new()
+	local startPos = UDim2.new()
+	header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = panel.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			panel.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+
+	-- Log function
+	local function pushLog(text)
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(1, -10, 0, 18)
+		lbl.BackgroundTransparency = 1
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.Text = tostring(text)
+		lbl.TextColor3 = Color3.fromRGB(200,200,200)
+		lbl.Font = Enum.Font.SourceSans
+		lbl.TextSize = 12
+		lbl.Parent = scroll
+		scroll.CanvasSize = UDim2.new(0, 0, 0, uiList.AbsoluteContentSize.Y + 10)
+	end
+
+	btnClear.MouseButton1Click:Connect(function()
+		for _,c in ipairs(scroll:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
+		scroll.CanvasSize = UDim2.new(0,0,0,0)
+	end)
+
+	local viewportEnabled = true
+	btnToggle.MouseButton1Click:Connect(function()
+		viewportEnabled = not viewportEnabled
+		pushLog("Viewport enabled: "..tostring(viewportEnabled))
+		for _,p in pairs(portals) do
+			if p and p.ViewportFrame then
+				p.ViewportFrame.Visible = viewportEnabled
+			end
+		end
+	end)
+
+	return {
+		ScreenGui = screenGui,
+		PushLog = pushLog,
+		Notify = function(t, msg) pushLog(("[%s] %s"):format(tostring(t), tostring(msg))) end
+	}
+end
+
+local debugPanel = createDebugPanel()
+local function log(...) debugPanel.PushLog(table.concat({...}," ")) end
+
+-- SAFE helpers pour orientation du portail (utilise la normale du hit)
+local function computePortalCFrame(position, normal)
+	-- normal = surface normal (pointing out of surface). We want the portal to face outward.
+	-- choose an arbitrary "up" that isn't parallel to normal
+	local worldUp = Vector3.new(0,1,0)
+	local dot = math.abs(normal:Dot(worldUp))
+	local upVector = (dot > 0.95) and Vector3.new(0,0,1) or worldUp
+	local right = normal:Cross(upVector)
+	if right.Magnitude == 0 then right = Vector3.new(1,0,0) end
+	right = right.Unit
+	local up = right:Cross(normal).Unit
+	-- Construct CFrame from basis: right, up, -normal (so front faces -normal)
+	local cf = CFrame.fromMatrix(position, right, up, -normal)
+	return cf
+end
+
+-- Crée le Part du portail + ViewportFrame minimal
+local function createPortalPart(pos, normal, color3)
 	local p = Instance.new("Part")
-	p.Name = "Portal"
+	p.Name = "PortalPart"
 	p.Size = PORTAL_SIZE
 	p.Anchored = true
 	p.CanCollide = false
 	p.Material = Enum.Material.SmoothPlastic
-	p.Transparency = 0
-	p.Color = Color3.fromRGB(20, 20, 20)
+	p.Color = color3
+	p.Transparency = 0.15
 	p.Parent = workspace
+	p.CFrame = computePortalCFrame(pos, normal)
 
-	-- Orientation selon la normale du hit
-	local upVector = Vector3.new(0, 1, 0)
-	if math.abs(normal:Dot(upVector)) > 0.9 then
-		-- Sol ou plafond : utiliser X pour stabiliser la rotation
-		upVector = Vector3.new(0, 0, 1)
-	end
-	local right = normal:Cross(upVector).Unit
-	local up = right:Cross(normal).Unit
-	p.CFrame = CFrame.fromMatrix(pos, right, up, -normal)
+	-- Outline visible
+	local box = Instance.new("SelectionBox")
+	box.Adornee = p
+	box.Color3 = color3
+	box.LineThickness = 0.03
+	box.Parent = p
 
-	-- Outline coloré
-	local sb = Instance.new("SelectionBox")
-	sb.Adornee = p
-	sb.LineThickness = 0.03
-	sb.SurfaceTransparency = 0.5
-	sb.Color3 = color
-	sb.Parent = p
-
-	-- SurfaceGui + Viewport
+	-- SurfaceGui + ViewportFrame
 	local surface = Instance.new("SurfaceGui")
 	surface.Face = Enum.NormalId.Front
 	surface.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
@@ -54,108 +213,232 @@ local function createPortal(pos, normal, color)
 	surface.Parent = p
 
 	local vp = Instance.new("ViewportFrame")
-	vp.Size = UDim2.new(1, 0, 1, 0)
-	vp.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+	vp.Size = UDim2.new(1,0,1,0)
 	vp.BackgroundTransparency = 0
-	vp.CurrentCamera = nil
+	vp.BackgroundColor3 = Color3.fromRGB(6,6,6)
 	vp.Parent = surface
 
-	return p, vp
+	-- container for clones (small)
+	local clonesFolder = Instance.new("Folder")
+	clonesFolder.Name = "PortalClones"
+	clonesFolder.Parent = vp
+
+	return p, vp, clonesFolder
 end
 
--- Place un portail
-local function placePortal(colorName, color3, pos, normal)
+-- Récupère une liste limitée de parts proches de pos (limité par VIEW_CLONE_MAX)
+local function gatherNearbyPartsLimited(pos, radius, maxCount)
+	local out = {}
+	local count = 0
+	-- iterate workspace's children (use GetChildren + selective search to be faster)
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("BasePart") and obj.CanCollide and not obj:IsDescendantOf(workspace.Terrain) then
+			local d = (obj.Position - pos).Magnitude
+			if d <= radius then
+				table.insert(out, obj)
+				count = count + 1
+				if count >= maxCount then break end
+			end
+		end
+	end
+	return out
+end
+
+-- Clone limités et tag origCFrame
+local function createLimitedClones(portalData)
+	if not portalData or not portalData.Part or not portalData.clonesFolder then return end
+	-- clear old
+	for _,c in ipairs(portalData.clonesFolder:GetChildren()) do c:Destroy() end
+	local pos = portalData.Part.Position
+	local nearby = gatherNearbyPartsLimited(pos, VIEW_CLONE_RADIUS, VIEW_CLONE_MAX)
+	local created = 0
+	for _, part in ipairs(nearby) do
+		local ok, clone = pcall(function() return part:Clone() end)
+		if ok and clone then
+			-- strip scripts for safety (if any)
+			for _, d in ipairs(clone:GetDescendants()) do
+				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+					d:Destroy()
+				end
+			end
+			-- anchor clones
+			for _, sub in ipairs(clone:GetDescendants()) do
+				if sub:IsA("BasePart") then sub.Anchored = true end
+			end
+			clone:SetAttribute("origCFrame", part.CFrame)
+			clone.Parent = portalData.clonesFolder
+			created = created + 1
+		end
+	end
+
+	-- clone player's character (only the local player, lightweight)
+	if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+		local ok, charClone = pcall(function() return player.Character:Clone() end)
+		if ok and charClone then
+			-- remove scripts & anchor parts
+			for _, d in ipairs(charClone:GetDescendants()) do
+				if d:IsA("BasePart") then d.Anchored = true end
+				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then d:Destroy() end
+			end
+			charClone.Parent = portalData.clonesFolder
+			charClone:SetAttribute("origCFrame", player.Character.PrimaryPart and player.Character.PrimaryPart.CFrame or player.Character:GetModelCFrame())
+		end
+	end
+
+	debugPanel.PushLog(("Cloned %d objects for viewport (max %d)."):format(created, VIEW_CLONE_MAX))
+end
+
+-- Place portal function (construct / link / create clones)
+local function placePortal(colorName, color3, hitPos, hitNormal)
+	-- destroy existing same color
 	if portals[colorName] and portals[colorName].Part then
 		portals[colorName].Part:Destroy()
 	end
 
-	local part, vp = createPortal(pos, normal, color3)
-
+	local part, vp, clonesFolder = createPortalPart(hitPos, hitNormal, color3)
 	local cam = Instance.new("Camera")
 	cam.Parent = vp
-	vp.CurrentCamera = cam
-
-	local portalData = {
+	-- keep portal data
+	local data = {
 		Part = part,
-		Color = color3,
-		Viewport = vp,
+		ViewportFrame = vp,
 		Camera = cam,
+		clonesFolder = clonesFolder,
+		Other = nil
 	}
-	portals[colorName] = portalData
+	portals[colorName] = data
 
-	-- Lier les portails entre eux
+	-- link other
 	local otherName = (colorName == "red") and "blue" or "red"
-	local otherPortal = portals[otherName]
-	if otherPortal and otherPortal.Part then
-		portalData.Other = otherPortal
-		otherPortal.Other = portalData
-	else
-		portalData.Other = nil
+	if portals[otherName] and portals[otherName].Part then
+		data.Other = portals[otherName]
+		portals[otherName].Other = data
 	end
 
-	-- Téléportation quand le joueur touche
-	part.Touched:Connect(function(hit)
+	-- create limited clones once (cheap)
+	local success, err = pcall(function() createLimitedClones(data) end)
+	if not success then
+		warn("PortalGun: erreur lors du clonage: "..tostring(err))
+		notify("PortalGun - Erreur", "Erreur lors du clonage pour le viewport (voir console).")
+	end
+
+	-- set initial viewport camera transform if other exists
+	if data.Other and data.Other.Part then
+		-- set camera relative mapping
+		local worldCam = camera
+		local rel = data.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
+		data.Camera.CFrame = data.Part.CFrame * rel
+		data.ViewportFrame.CurrentCamera = data.Camera
+		-- make viewport transparent so it looks like 'seeing through'
+		data.ViewportFrame.BackgroundTransparency = 1
+	else
+		-- single portal -> dark background
+		data.ViewportFrame.BackgroundTransparency = 0
+	end
+
+	-- Connect teleport touch (safe check)
+	data._touchConn = part.Touched:Connect(function(hit)
 		local char = player.Character
 		if not char then return end
 		local hrp = char:FindFirstChild("HumanoidRootPart")
-		if not hrp or not (hit:IsDescendantOf(char) or hit == hrp) then return end
+		if not hrp then return end
+		-- ensure that the touching part belongs to this player (avoid teleporting others)
+		if not (hit == hrp or hit:IsDescendantOf(char)) then return end
+		-- cooldown
 		if tick() - lastTeleport < TELEPORT_COOLDOWN then return end
 		lastTeleport = tick()
-
-		if not portalData.Other or not portalData.Other.Part then return end
-
-		local fromCF = portalData.Part.CFrame
-		local toCF = portalData.Other.Part.CFrame
+		-- need other portal
+		if not data.Other or not data.Other.Part then
+			notify("Portal", "Aucun portail opposé. Impossible de téléporter.")
+			return
+		end
+		-- compute mapping
+		local fromCF = data.Part.CFrame
+		local toCF = data.Other.Part.CFrame
 		local rel = fromCF:Inverse() * hrp.CFrame
-		local newCF = toCF * rel + TELEPORT_OFFSET
+		local newCF = toCF * rel
+		-- small safety: if newCF is too close (overlap), offset upward
+		if (newCF.Position - hrp.Position).Magnitude < MIN_SEPARATION_FOR_TELEPORT then
+			newCF = newCF + Vector3.new(0, 3, 0)
+		end
+		newCF = newCF + TELEPORT_OFFSET
+		-- teleport local player safely
 		hrp.CFrame = newCF
 	end)
+
+	debugPanel.PushLog(("Placed %s portal at (%.1f, %.1f, %.1f)"):format(colorName, hitPos.X, hitPos.Y, hitPos.Z))
 end
 
--- Mise à jour visuelle
-RunService.RenderStepped:Connect(function()
-	for name, p in pairs(portals) do
-		if p and p.Part and p.Viewport and p.Camera then
-			if p.Other and p.Other.Part then
-				p.Viewport.BackgroundTransparency = 1
-				local worldCam = workspace.CurrentCamera
-				local relative = p.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
-				p.Camera.CFrame = p.Part.CFrame * relative
-				p.Viewport.CurrentCamera = p.Camera
+-- Update loop : met à jour camera des viewports & clones CFrame à RATE limitée
+RunService.RenderStepped:Connect(function(dt)
+	lastViewUpdate = lastViewUpdate + dt
+	if lastViewUpdate < VIEW_UPDATE_RATE then return end
+	lastViewUpdate = 0
+
+	for name, data in pairs(portals) do
+		if data and data.Part and data.ViewportFrame and data.Camera then
+			-- if we have the other portal, set the viewport camera to represent 'what the other sees'
+			if data.Other and data.Other.Part then
+				-- update camera mapping from real world camera only (cheap)
+				local ok, err = pcall(function()
+					local worldCam = camera
+					local rel = data.Other.Part.CFrame:ToObjectSpace(worldCam.CFrame)
+					data.Camera.CFrame = data.Part.CFrame * rel
+					data.ViewportFrame.CurrentCamera = data.Camera
+				end)
+				if not ok then
+					warn("PortalGun: erreur mise à jour camera viewport: "..tostring(err))
+				end
+
+				-- update cloned objects CFrame using stored origCFrame -> mapped to target portal
+				for _, clone in ipairs(data.clonesFolder:GetChildren()) do
+					local orig = clone:GetAttribute("origCFrame")
+					if orig then
+						-- mapping: orig (in world) -> relative to other portal, then to this portal's viewport
+						local mapped = data.Part.CFrame * (data.Other.Part.CFrame:ToObjectSpace(orig))
+						-- pcall to be safe
+						pcall(function() clone:SetPrimaryPartCFrame and clone:SetPrimaryPartCFrame(mapped) end)
+						-- also try simple CFrame set on parts
+						if clone:IsA("BasePart") then
+							clone.CFrame = mapped
+						else
+							-- try to set PrimaryPart if model
+							if clone.PrimaryPart then
+								clone:SetPrimaryPartCFrame(mapped)
+							else
+								-- try to set HumanoidRootPart inside model
+								local hrp = clone:FindFirstChild("HumanoidRootPart", true)
+								if hrp and hrp:IsA("BasePart") then
+									hrp.CFrame = mapped
+								end
+							end
+						end
+					end
+				end
 			else
-				p.Viewport.BackgroundTransparency = 0
+				-- no other portal → show dark panel (no camera)
+				data.ViewportFrame.CurrentCamera = nil
+				data.ViewportFrame.BackgroundTransparency = 0
 			end
 		end
 	end
 end)
 
--- Gestion de la souris
-tool.Equipped:Connect(function(m)
-	mouse = m
+-- ACTIVATION / input handlers
+tool.Equipped:Connect(function()
+	-- player:GetMouse() is usually ok for desktop and mobile touch when equipped in a Tool
+	mouse = player:GetMouse()
+	debugPanel.PushLog("Tool equipped")
+end)
+
+tool.Unequipped:Connect(function()
+	mouse = nil
+	debugPanel.PushLog("Tool unequipped")
 end)
 
 tool.Activated:Connect(function()
-	if not mouse then return end
-	local target = mouse.Target
-	if not target then return end
-
-	local hitPos = mouse.Hit.Position
-	local normal = mouse.Hit.LookVector * -1 -- Inversé pour que le portail regarde la surface
-	local colorName = nextColor
-	local color = (colorName == "red") and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(90, 140, 255)
-
-	placePortal(colorName, color, hitPos, normal)
-
-	nextColor = (nextColor == "red") and "blue" or "red"
-end)
-
--- Nettoyage
-tool.AncestryChanged:Connect(function(_, parent)
-	if not parent then
-		for _, p in pairs(portals) do
-			if p and p.Part then
-				p.Part:Destroy()
-			end
-		end
-	end
-end)
+	-- safe aim detection: use mouse if available, else cast from center of screen
+	local hitPos, hitNormal = nil, nil
+	if mouse and mouse.Hit then
+		hitPos = mouse.Hit.Position
+		-- normal from mouse.Hit: LookVector points from camera to hit; surfa
